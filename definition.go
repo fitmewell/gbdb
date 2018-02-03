@@ -11,11 +11,12 @@ import (
 
 // BColumn all column generated from struct
 type BColumn struct {
-	SQLName      string
-	Field        reflect.StructField
-	FieldIndex   int
-	Index        int
-	IsPrimaryKey bool
+	SQLName         string
+	Field           reflect.StructField
+	FieldIndex      int
+	Index           int
+	IsPrimaryKey    bool
+	IsAutoIncreased bool
 }
 
 // GetValue get selected value
@@ -24,7 +25,7 @@ func (bc *BColumn) GetValue(v interface{}) string {
 	for vf.Kind() == reflect.Ptr {
 		vf = vf.Elem()
 	}
-	fv := vf.Field(bc.Index)
+	fv := vf.Field(bc.FieldIndex)
 	for fv.Kind() == reflect.Ptr {
 		fv = fv.Elem()
 	}
@@ -118,27 +119,40 @@ var cacheMutex = sync.Mutex{}
 
 // GetDefinition get a table definition from cache or build a new one
 func GetDefinition(rType reflect.Type) (bTable BTable, err error) {
-	bTable, ok := cachedDefinition[rType]
-	if ok {
-		return bTable, err
+
+	for rType.Kind() == reflect.Ptr {
+		rType = rType.Elem()
 	}
-	cacheMutex.Lock()
-	defer cacheMutex.Unlock()
-	bTable, ok = cachedDefinition[rType]
-	if ok {
+
+	switch rType.Kind() {
+	case reflect.Struct:
+		bTable, ok := cachedDefinition[rType]
+		if ok {
+			log.Printf("get [%v] from cache", rType)
+			return bTable, err
+		}
+		log.Printf("init  [%v] new struct", rType)
+		cacheMutex.Lock()
+		defer cacheMutex.Unlock()
+		bTable, ok = cachedDefinition[rType]
+		if ok {
+			return bTable, err
+		}
+		bTable, err = genDefinition(rType)
+		if err != nil {
+			return bTable, err
+		}
+		cachedDefinition[rType] = bTable
 		return bTable, err
+	default:
+		return bTable, errors.New("only struct is supported now")
 	}
-	bTable, err = genDefinition(rType)
-	if err != nil {
-		return bTable, err
-	}
-	cachedDefinition[rType] = bTable
-	return bTable, err
 }
 
 const sqlName = "name"
 const sqlIndex = "index"
 const sqlPrimaryKey = "primaryKey"
+const sqlAutoIncreased = "autoIncreased"
 
 // gen table sql definition from struct reflect info
 func genDefinition(t reflect.Type) (bTable BTable, err error) {
@@ -168,9 +182,14 @@ func genDefinition(t reflect.Type) (bTable BTable, err error) {
 			}
 			if field.Tag.Get(sqlName) != "" {
 				column.SQLName = field.Tag.Get(sqlName)
+			} else {
+				column.SQLName = humpNamed(field.Name)
 			}
 			if field.Tag.Get(sqlPrimaryKey) != "" {
 				column.IsPrimaryKey, err = strconv.ParseBool(field.Tag.Get(sqlPrimaryKey))
+				if err != nil {
+					return bTable, err
+				}
 				if column.IsPrimaryKey {
 					if !foundPrimary {
 						bTable.PrimaryKey = column
@@ -178,6 +197,12 @@ func genDefinition(t reflect.Type) (bTable BTable, err error) {
 					} else {
 						return bTable, errors.New("duplicate primary key found")
 					}
+				}
+			}
+			if field.Tag.Get(sqlAutoIncreased) != "" {
+				column.IsAutoIncreased, err = strconv.ParseBool(field.Tag.Get(sqlAutoIncreased))
+				if err != nil {
+					return bTable, err
 				}
 			}
 			cacheMap[field.Name] = 1
